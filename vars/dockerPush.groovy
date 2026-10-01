@@ -27,20 +27,26 @@ def call(Map config = [:]) {
         )
     ]) {
 
-        sh '''
-            set -e
+        withEnv([
+            "IMAGE_REPOSITORY=${imageRepository}",
+            "IMAGE_TAG=${imageTag}"
+        ]) {
 
-            echo "$DOCKER_PASSWORD" | docker login \
-                --username "$DOCKER_USERNAME" \
-                --password-stdin
+            sh '''
+                set -e
 
-            chmod +x docker-push.sh
+                echo "$DOCKER_PASSWORD" | docker login \
+                    --username "$DOCKER_USERNAME" \
+                    --password-stdin
 
-            ./docker-push.sh \
-                "${IMAGE_REPOSITORY}" \
-                "${IMAGE_TAG}"
+                chmod +x docker-push.sh
 
-            docker logout
-        '''
+                ./docker-push.sh \
+                    "$IMAGE_REPOSITORY" \
+                    "$IMAGE_TAG"
+
+                docker logout
+            '''
+        }
     }
 }
