@@ -1,14 +1,24 @@
 def call(Map config = [:]) {
 
-    def imageRepository = config.imageRepository
-    def imageTag = config.imageTag ?: env.BUILD_NUMBER
-
-    if (!imageRepository) {
+    if (!config.imageRepository) {
         error "imageRepository is required"
     }
 
+    def imageRepository = config.imageRepository
+    def imageTag = config.imageTag ?: env.BUILD_NUMBER
+
+    def scriptContent = libraryResource('scripts/docker-build.sh')
+
+    writeFile(
+        file: 'docker-build.sh',
+        text: scriptContent
+    )
+
     sh """
-        chmod +x scripts/docker-build.sh
-        scripts/docker-build.sh '${imageRepository}' '${imageTag}'
+        chmod +x docker-build.sh
+
+        ./docker-build.sh \
+            '${imageRepository}' \
+            '${imageTag}'
     """
 }
