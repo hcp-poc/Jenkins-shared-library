@@ -4,8 +4,13 @@ def call(Map config = [:]) {
         error "imageRepository is required"
     }
 
+    if (!config.credentialsId) {
+        error "credentialsId is required"
+    }
+
     def imageRepository = config.imageRepository
     def imageTag = config.imageTag ?: env.BUILD_NUMBER
+    def credentialsId = config.credentialsId
 
     def scriptContent = libraryResource('scripts/docker-push.sh')
 
@@ -14,11 +19,28 @@ def call(Map config = [:]) {
         text: scriptContent
     )
 
-    sh """
-        chmod +x docker-push.sh
+    withCredentials([
+        usernamePassword(
+            credentialsId: credentialsId,
+            usernameVariable: 'DOCKER_USERNAME',
+            passwordVariable: 'DOCKER_PASSWORD'
+        )
+    ]) {
 
-        ./docker-push.sh \
-            '${imageRepository}' \
-            '${imageTag}'
-    """
+        sh '''
+            set -e
+
+            echo "$DOCKER_PASSWORD" | docker login \
+                --username "$DOCKER_USERNAME" \
+                --password-stdin
+
+            chmod +x docker-push.sh
+
+            ./docker-push.sh \
+                "${IMAGE_REPOSITORY}" \
+                "${IMAGE_TAG}"
+
+            docker logout
+        '''
+    }
 }
