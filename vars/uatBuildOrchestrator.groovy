@@ -113,12 +113,7 @@ def call(Map config = [:]) {
         echo "----------------------------------------------"
 
         /*
-         * Checkout the requested release branch.
-         *
-         * IMPORTANT:
-         * Do not silently convert every checkout error into
-         * "branch not found". A real Git/credential failure
-         * must fail the pipeline.
+         * Checkout requested release branch.
          */
 
         try {
@@ -143,7 +138,8 @@ def call(Map config = [:]) {
                 echo "Current release commit: ${currentCommit}"
 
                 /*
-                 * Get commit history between releases.
+                 * Get commits between previous UAT commit
+                 * and current release commit.
                  */
 
                 if (previousCommit &&
@@ -181,18 +177,15 @@ def call(Map config = [:]) {
 
         } catch (Exception e) {
 
-            /*
-             * Only treat the checkout as a missing branch when
-             * Jenkins/Git explicitly reports that no revision
-             * was found.
-             */
-
-            def errorMessage =
-                e.getMessage() ?: ''
-
-                   } catch (Exception e) {
-
             def errorMessage = e.getMessage() ?: ''
+
+            /*
+             * Treat only an actual missing revision/branch
+             * as a missing release branch.
+             *
+             * Other Git, credential, network or Jenkins errors
+             * must fail the pipeline.
+             */
 
             if (errorMessage.contains("Couldn't find any revision") ||
                 errorMessage.contains("does not exist")) {
@@ -210,22 +203,9 @@ def call(Map config = [:]) {
             }
         }
 
-                echo "Release branch does not exist for ${appName}"
-
-                branchExists = false
-                currentCommit = ''
-
-            } else {
-
-                error(
-                    "Unable to check ${appName}: ${errorMessage}"
-                )
-            }
-        }
-
         /*
          * -----------------------------------------------------
-         * Determine action
+         * Determine BUILD / SKIP
          * -----------------------------------------------------
          */
 
@@ -270,68 +250,68 @@ def call(Map config = [:]) {
 
     /*
      * ---------------------------------------------------------
-     * 4. Build approval summary
+     * 4. Build Approval 1 message
      * ---------------------------------------------------------
      */
 
     def approvalMessage = new StringBuilder()
 
     approvalMessage.append(
-        "UAT PRE-BUILD APPROVAL\\n"
+        "UAT PRE-BUILD APPROVAL\n"
     )
 
     approvalMessage.append(
-        "==============================================\\n"
+        "==============================================\n"
     )
 
     approvalMessage.append(
-        "Release Branch : ${releaseBranch}\\n"
+        "Release Branch : ${releaseBranch}\n"
     )
 
     approvalMessage.append(
-        "Release Version: ${releaseVersion}\\n"
+        "Release Version: ${releaseVersion}\n"
     )
 
     approvalMessage.append(
-        "==============================================\\n\\n"
+        "==============================================\n\n"
     )
 
     approvalMessage.append(
-        "Review ALL applications before approving.\\n\\n"
+        "Review ALL applications before approving.\n\n"
     )
 
     comparison.each { app ->
 
         approvalMessage.append(
-            "Application      : ${app.name}\\n"
+            "Application      : ${app.name}\n"
         )
 
         approvalMessage.append(
-            "Release Branch   : ${app.branchExists ? app.releaseBranch : 'NOT FOUND'}\\n"
+            "Release Branch   : ${app.branchExists ? app.releaseBranch : 'NOT FOUND'}\n"
         )
 
         approvalMessage.append(
-            "Previous Commit  : ${app.previousCommit ?: 'N/A'}\\n"
+            "Previous Commit  : ${app.previousCommit ?: 'N/A'}\n"
         )
 
         approvalMessage.append(
-            "Current Commit   : ${app.currentCommit ?: 'N/A'}\\n"
+            "Current Commit   : ${app.currentCommit ?: 'N/A'}\n"
         )
 
         approvalMessage.append(
-            "Commit Count     : ${app.commitCount}\\n"
+            "Commit Count     : ${app.commitCount}\n"
         )
 
         approvalMessage.append(
-            "Status            : ${app.status}\\n"
+            "Status           : ${app.status}\n"
         )
 
         approvalMessage.append(
-            "Action            : ${app.action}\\n"
+            "Action           : ${app.action}\n"
         )
 
         approvalMessage.append(
-            "----------------------------------------------\\n"
+            "----------------------------------------------\n"
         )
     }
 
@@ -343,17 +323,17 @@ def call(Map config = [:]) {
         it.action == 'SKIP'
     }
 
-    approvalMessage.append("\\n")
+    approvalMessage.append("\n")
 
     approvalMessage.append(
-        "BUILD applications: ${buildApps.size()}\\n"
+        "BUILD applications: ${buildApps.size()}\n"
     )
 
     approvalMessage.append(
-        "SKIP applications : ${skipApps.size()}\\n"
+        "SKIP applications : ${skipApps.size()}\n"
     )
 
-    approvalMessage.append("\\n")
+    approvalMessage.append("\n")
 
     approvalMessage.append(
         "Approve to start the UAT application builds?"
@@ -361,7 +341,7 @@ def call(Map config = [:]) {
 
     /*
      * ---------------------------------------------------------
-     * 5. Print same information to console
+     * 5. Print comparison to Jenkins console
      * ---------------------------------------------------------
      */
 
@@ -394,7 +374,7 @@ def call(Map config = [:]) {
 
     /*
      * ---------------------------------------------------------
-     * 6. APPROVAL 1
+     * 6. APPROVAL 1 - PRE BUILD
      * ---------------------------------------------------------
      */
 
@@ -425,6 +405,7 @@ def call(Map config = [:]) {
     stage('Build Changed Applications') {
 
         def buildResults = [:]
+
         def parallelBuilds = [:]
 
         buildApps.each { app ->
@@ -467,6 +448,12 @@ def call(Map config = [:]) {
 
         parallel parallelBuilds
 
+        /*
+         * -----------------------------------------------------
+         * 8. Build summary
+         * -----------------------------------------------------
+         */
+
         echo ""
         echo "=============================================================="
         echo "UAT BUILD SUMMARY"
@@ -495,4 +482,3 @@ def call(Map config = [:]) {
 
     return comparison
 }
-
