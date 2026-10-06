@@ -18,11 +18,11 @@ def call(Map config = [:]) {
         text: scriptContent
     )
 
-    sh '''
+    sh """
         chmod +x docker-cleanup.sh
 
         ./docker-cleanup.sh \
-            "${IMAGE_REPOSITORY}" \
-            "${IMAGE_TAG}"
-    '''
+            '${imageRepository}' \
+            '${imageTag}'
+    """
 }
