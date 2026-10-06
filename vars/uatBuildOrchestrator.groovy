@@ -1,10 +1,16 @@
+```groovy
 def call(Map config = [:]) {
 
     if (!config.releaseBranch) {
         error "releaseBranch is required"
     }
 
-    def releaseBranch = config.releaseBranch
+    def releaseBranch = config.releaseBranch.trim()
+
+    if (!releaseBranch.startsWith('release/')) {
+        error "RELEASE_BRANCH must start with 'release/'"
+    }
+
     def releaseVersion = releaseBranch.replaceFirst(/^release\//, '')
 
     echo "=============================================="
@@ -30,7 +36,7 @@ def call(Map config = [:]) {
 
     def applications = applicationsConfig.applications
 
-    if (!applications || applications.size() == 0) {
+    if (!applications || applications.isEmpty()) {
         error "No applications found in uat-applications.yaml"
     }
 
@@ -53,7 +59,8 @@ def call(Map config = [:]) {
 
     def currentManifest = [:]
 
-    def manifestFile = 'uat-manifest/environments/uat/manifest.yaml'
+    def manifestFile =
+        'uat-manifest/environments/uat/manifest.yaml'
 
     if (fileExists(manifestFile)) {
 
@@ -98,13 +105,20 @@ def call(Map config = [:]) {
         def commits = []
 
         echo ""
-        echo "Checking ${appName}"
+        echo "----------------------------------------------"
+        echo "Checking: ${appName}"
         echo "Repository: ${repoUrl}"
         echo "Release branch: ${releaseBranch}"
+        echo "Previous UAT commit: ${previousCommit ?: 'N/A'}"
+        echo "----------------------------------------------"
 
         /*
-         * Checkout release branch.
-         * If branch does not exist, mark application as SKIP.
+         * Checkout the requested release branch.
+         *
+         * IMPORTANT:
+         * Do not silently convert every checkout error into
+         * "branch not found". A real Git/credential failure
+         * must fail the pipeline.
          */
 
         try {
@@ -126,11 +140,10 @@ def call(Map config = [:]) {
                     returnStdout: true
                 ).trim()
 
-                echo "Release branch commit: ${currentCommit}"
+                echo "Current release commit: ${currentCommit}"
 
                 /*
-                 * Get commits between previous UAT commit
-                 * and current release commit.
+                 * Get commit history between releases.
                  */
 
                 if (previousCommit &&
@@ -168,14 +181,42 @@ def call(Map config = [:]) {
 
         } catch (Exception e) {
 
-            echo "Release branch not found for ${appName}"
+            /*
+             * Only treat the checkout as a missing branch when
+             * Jenkins/Git explicitly reports that no revision
+             * was found.
+             */
 
-            branchExists = false
-            currentCommit = ''
+            def errorMessage =
+                e.getMessage() ?: ''
+
+            if (errorMessage.contains(
+                    'Couldn\'t find any revision'
+                ) ||
+                errorMessage.contains(
+                    'Couldn't find any revision'
+                ) ||
+                errorMessage.contains(
+                    'does not exist'
+                )) {
+
+                echo "Release branch does not exist for ${appName}"
+
+                branchExists = false
+                currentCommit = ''
+
+            } else {
+
+                error(
+                    "Unable to check ${appName}: ${errorMessage}"
+                )
+            }
         }
 
         /*
+         * -----------------------------------------------------
          * Determine action
+         * -----------------------------------------------------
          */
 
         def action = 'SKIP'
@@ -219,7 +260,98 @@ def call(Map config = [:]) {
 
     /*
      * ---------------------------------------------------------
-     * 4. Display complete comparison
+     * 4. Build approval summary
+     * ---------------------------------------------------------
+     */
+
+    def approvalMessage = new StringBuilder()
+
+    approvalMessage.append(
+        "UAT PRE-BUILD APPROVAL\\n"
+    )
+
+    approvalMessage.append(
+        "==============================================\\n"
+    )
+
+    approvalMessage.append(
+        "Release Branch : ${releaseBranch}\\n"
+    )
+
+    approvalMessage.append(
+        "Release Version: ${releaseVersion}\\n"
+    )
+
+    approvalMessage.append(
+        "==============================================\\n\\n"
+    )
+
+    approvalMessage.append(
+        "Review ALL applications before approving.\\n\\n"
+    )
+
+    comparison.each { app ->
+
+        approvalMessage.append(
+            "Application      : ${app.name}\\n"
+        )
+
+        approvalMessage.append(
+            "Release Branch   : ${app.branchExists ? app.releaseBranch : 'NOT FOUND'}\\n"
+        )
+
+        approvalMessage.append(
+            "Previous Commit  : ${app.previousCommit ?: 'N/A'}\\n"
+        )
+
+        approvalMessage.append(
+            "Current Commit   : ${app.currentCommit ?: 'N/A'}\\n"
+        )
+
+        approvalMessage.append(
+            "Commit Count     : ${app.commitCount}\\n"
+        )
+
+        approvalMessage.append(
+            "Status            : ${app.status}\\n"
+        )
+
+        approvalMessage.append(
+            "Action            : ${app.action}\\n"
+        )
+
+        approvalMessage.append(
+            "----------------------------------------------\\n"
+        )
+    }
+
+    def buildApps = comparison.findAll {
+        it.action == 'BUILD'
+    }
+
+    def skipApps = comparison.findAll {
+        it.action == 'SKIP'
+    }
+
+    approvalMessage.append("\\n")
+
+    approvalMessage.append(
+        "BUILD applications: ${buildApps.size()}\\n"
+    )
+
+    approvalMessage.append(
+        "SKIP applications : ${skipApps.size()}\\n"
+    )
+
+    approvalMessage.append("\\n")
+
+    approvalMessage.append(
+        "Approve to start the UAT application builds?"
+    )
+
+    /*
+     * ---------------------------------------------------------
+     * 5. Print same information to console
      * ---------------------------------------------------------
      */
 
@@ -227,21 +359,17 @@ def call(Map config = [:]) {
     echo "=============================================================="
     echo "UAT RELEASE COMPARISON"
     echo "=============================================================="
-    echo "Release Branch : ${releaseBranch}"
-    echo "Release Version: ${releaseVersion}"
-    echo "=============================================================="
 
     comparison.each { app ->
 
         echo ""
-        echo "Application       : ${app.name}"
-        echo "Release Branch    : ${app.releaseBranch}"
-        echo "Branch Exists     : ${app.branchExists}"
-        echo "Previous Commit   : ${app.previousCommit ?: 'N/A'}"
-        echo "Current Commit    : ${app.currentCommit ?: 'N/A'}"
-        echo "Commit Count      : ${app.commitCount}"
-        echo "Status            : ${app.status}"
-        echo "Action            : ${app.action}"
+        echo "Application      : ${app.name}"
+        echo "Release Branch   : ${app.branchExists ? app.releaseBranch : 'NOT FOUND'}"
+        echo "Previous Commit  : ${app.previousCommit ?: 'N/A'}"
+        echo "Current Commit   : ${app.currentCommit ?: 'N/A'}"
+        echo "Commit Count     : ${app.commitCount}"
+        echo "Status           : ${app.status}"
+        echo "Action           : ${app.action}"
 
         if (app.commits) {
 
@@ -254,121 +382,107 @@ def call(Map config = [:]) {
         }
     }
 
-    echo ""
-    echo "=============================================================="
-    echo "PRE-BUILD APPROVAL REQUIRED"
-    echo "=============================================================="
-    echo "Review ALL applications above."
-    echo "Only applications marked BUILD will be built."
-    echo "=============================================================="
-
     /*
      * ---------------------------------------------------------
-     * 5. Approval 1
+     * 6. APPROVAL 1
      * ---------------------------------------------------------
      */
 
-    input(
-        message: "Approve UAT build for ${releaseVersion}?",
-        ok: "Approve UAT Build",
-        submitter: "Nikhil,Ravi"
-    )
+    stage('Approval 1 - Pre-Build') {
 
-    /*
-     * ---------------------------------------------------------
-     * 6. Trigger changed application builds
-     * ---------------------------------------------------------
-     */
-
-    def changedApps = comparison.findAll {
-        it.action == 'BUILD'
+        input(
+            message: approvalMessage.toString(),
+            ok: 'Approve UAT Build',
+            submitter: 'Nikhil,Ravi'
+        )
     }
 
-    if (changedApps.size() == 0) {
+    /*
+     * ---------------------------------------------------------
+     * 7. Trigger changed application builds
+     * ---------------------------------------------------------
+     */
+
+    if (buildApps.isEmpty()) {
 
         echo ""
         echo "No applications require a new UAT build."
-        echo "UAT build process completed."
+        echo "UAT Build Orchestrator completed."
 
         return comparison
     }
 
-    echo ""
-    echo "=============================================================="
-    echo "TRIGGERING UAT APPLICATION BUILDS"
-    echo "=============================================================="
+    stage('Build Changed Applications') {
 
-    def buildResults = [:]
+        def buildResults = [:]
+        def parallelBuilds = [:]
 
-    def parallelBuilds = [:]
+        buildApps.each { app ->
 
-    changedApps.each { app ->
+            def appData = app
 
-        def appData = app
+            parallelBuilds[app.name] = {
 
-        parallelBuilds[app.name] = {
+                echo ""
+                echo "=============================================="
+                echo "Starting UAT build: ${appData.name}"
+                echo "=============================================="
 
-            echo "Starting build for ${appData.name}"
+                def buildRun = build(
+                    job: appData.buildJob,
+                    wait: true,
+                    propagate: true,
+                    parameters: [
+                        string(
+                            name: 'RELEASE_BRANCH',
+                            value: releaseBranch
+                        ),
+                        string(
+                            name: 'RELEASE_VERSION',
+                            value: releaseVersion
+                        )
+                    ]
+                )
 
-            def buildRun = build(
-                job: appData.buildJob,
-                wait: true,
-                propagate: true,
-                parameters: [
-                    string(
-                        name: 'RELEASE_BRANCH',
-                        value: releaseBranch
-                    ),
-                    string(
-                        name: 'RELEASE_VERSION',
-                        value: releaseVersion
-                    )
+                buildResults[appData.name] = [
+                    job         : appData.buildJob,
+                    buildNumber : buildRun.number,
+                    result      : buildRun.result
                 ]
-            )
 
-            buildResults[appData.name] = [
-                job         : appData.buildJob,
-                buildNumber : buildRun.number,
-                result      : buildRun.result
-            ]
-
-            echo "Completed ${appData.name}"
-            echo "Build Number: ${buildRun.number}"
+                echo "Completed: ${appData.name}"
+                echo "Build Number: ${buildRun.number}"
+            }
         }
-    }
 
-    parallel parallelBuilds
+        parallel parallelBuilds
 
-    /*
-     * ---------------------------------------------------------
-     * 7. Print build summary
-     * ---------------------------------------------------------
-     */
+        echo ""
+        echo "=============================================================="
+        echo "UAT BUILD SUMMARY"
+        echo "=============================================================="
 
-    echo ""
-    echo "=============================================================="
-    echo "UAT BUILD SUMMARY"
-    echo "=============================================================="
+        comparison.each { app ->
 
-    comparison.each { app ->
+            if (buildResults.containsKey(app.name)) {
 
-        if (buildResults.containsKey(app.name)) {
+                def result = buildResults[app.name]
 
-            def result = buildResults[app.name]
+                echo "${app.name}"
+                echo "  Action       : BUILD"
+                echo "  Jenkins Job  : ${result.job}"
+                echo "  Build Number : ${result.buildNumber}"
+                echo "  Result       : ${result.result}"
 
-            echo "${app.name}"
-            echo "  Action       : BUILD"
-            echo "  Jenkins Job  : ${result.job}"
-            echo "  Build Number : ${result.buildNumber}"
-            echo "  Result       : ${result.result}"
+            } else {
 
-        } else {
-
-            echo "${app.name}"
-            echo "  Action       : ${app.action}"
-            echo "  Build        : Not triggered"
+                echo "${app.name}"
+                echo "  Action       : ${app.action}"
+                echo "  Build        : Not triggered"
+            }
         }
     }
 
     return comparison
 }
+```
