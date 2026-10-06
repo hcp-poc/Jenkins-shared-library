@@ -190,15 +190,25 @@ def call(Map config = [:]) {
             def errorMessage =
                 e.getMessage() ?: ''
 
-            if (errorMessage.contains(
-                    'Couldn\'t find any revision'
-                ) ||
-                errorMessage.contains(
-                    'Couldn't find any revision'
-                ) ||
-                errorMessage.contains(
-                    'does not exist'
-                )) {
+                   } catch (Exception e) {
+
+            def errorMessage = e.getMessage() ?: ''
+
+            if (errorMessage.contains("Couldn't find any revision") ||
+                errorMessage.contains("does not exist")) {
+
+                echo "Release branch does not exist for ${appName}"
+
+                branchExists = false
+                currentCommit = ''
+
+            } else {
+
+                error(
+                    "Unable to check ${appName}: ${errorMessage}"
+                )
+            }
+        }
 
                 echo "Release branch does not exist for ${appName}"
 
