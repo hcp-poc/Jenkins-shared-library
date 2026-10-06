@@ -1,0 +1,21 @@
+applications:
+
+  - name: nextjs-app-1
+    repository: https://github.com/hcp-poc/nextjs-app-1.git
+    build_job: UAT/nextjs-app-1/nextjs-app-1-build
+    image_repository: rajvam6806/nextjs-app-1
+
+  - name: nextjs-app-2
+    repository: https://github.com/hcp-poc/nextjs-app-2.git
+    build_job: UAT/nextjs-app-2/nextjs-app-2-build
+    image_repository: rajvam6806/nextjs-app-2
+
+  - name: springboot-app-1
+    repository: https://github.com/hcp-poc/springboot-app-1.git
+    build_job: UAT/springboot-app-1/springboot-app-1-build
+    image_repository: rajvam6806/springboot-app-1
+
+  - name: springboot-app-2
+    repository: https://github.com/hcp-poc/springboot-app-2.git
+    build_job: UAT/springboot-app-2/springboot-app-2-build
+    image_repository: rajvam6806/springboot-app-2
