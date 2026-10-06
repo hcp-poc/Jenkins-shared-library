@@ -1,4 +1,4 @@
-```groovy
+
 def call(Map config = [:]) {
 
     if (!config.releaseBranch) {
@@ -485,4 +485,4 @@ def call(Map config = [:]) {
 
     return comparison
 }
-```
+
