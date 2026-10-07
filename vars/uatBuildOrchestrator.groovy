@@ -133,6 +133,86 @@ def call(Map config = [:]) {
         echo "This is treated as the first UAT release."
     }
 
+    /*
+     * ---------------------------------------------------------
+     * 3A. Load previous release snapshot for Git traceability
+     * ---------------------------------------------------------
+     *
+     * The current UAT environment manifest is the source of the
+     * currently deployed image state.
+     *
+     * If an older environment manifest was accidentally created
+     * without git_commit values, recover the Git commit from the
+     * most recent release snapshot instead of losing traceability.
+     * ---------------------------------------------------------
+     */
+
+    def previousReleaseManifest = [:]
+    def previousReleaseVersion = ''
+
+    try {
+
+        def releaseManifestPaths = sh(
+            script: '''
+                find uat-manifest/releases -mindepth 2 -maxdepth 2                     -type f -name manifest.yaml                     -print 2>/dev/null | sort
+            ''',
+            returnStdout: true
+        ).trim()
+
+        if (releaseManifestPaths) {
+
+            def candidateVersions = []
+
+            releaseManifestPaths.split('\\n').each { path ->
+
+                def match =
+                    (path =~ /uat-manifest\/releases\/(\\d{4}\.\\d{2}\.\\d{2})\/manifest\.yaml/)
+
+                if (match.find()) {
+
+                    def version = match.group(1)
+
+                    if (version != releaseVersion &&
+                        version < releaseVersion) {
+
+                        candidateVersions << [
+                            version: version,
+                            path: path
+                        ]
+                    }
+                }
+            }
+
+            if (!candidateVersions.isEmpty()) {
+
+                def latestPreviousRelease =
+                    candidateVersions.max {
+                        it.version
+                    }
+
+                previousReleaseVersion =
+                    latestPreviousRelease.version
+
+                previousReleaseManifest =
+                    readYaml(
+                        file: latestPreviousRelease.path
+                    ) ?: [:]
+
+                echo ""
+                echo "Previous release snapshot found."
+                echo "Previous Release Version : ${previousReleaseVersion}"
+                echo "Previous Release Manifest: ${latestPreviousRelease.path}"
+            }
+        }
+
+    } catch (Exception e) {
+
+        echo ""
+        echo "Unable to load previous release snapshot."
+        echo "Git commit fallback will use the current UAT manifest only."
+        echo "Reason: ${e.getMessage() ?: 'Unknown error'}"
+    }
+
 
     /*
      * ---------------------------------------------------------
@@ -265,6 +345,65 @@ def call(Map config = [:]) {
                 previousManifestApp.image_digest ?:
                 previousManifestApp.image?.digest ?:
                 ''
+        }
+
+        /*
+         * If the current UAT environment manifest does not contain
+         * a Git commit, recover it from the latest release snapshot.
+         * This protects Git traceability when an environment manifest
+         * was previously written with an empty git_commit.
+         */
+        if (!previousCommit &&
+            previousReleaseManifest &&
+            previousReleaseManifest.applications) {
+
+            def previousReleaseApp = null
+
+            if (previousReleaseManifest.applications instanceof List) {
+
+                previousReleaseApp =
+                    previousReleaseManifest.applications.find {
+                        it.name == appName
+                    }
+
+            } else if (previousReleaseManifest.applications instanceof Map) {
+
+                previousReleaseApp =
+                    previousReleaseManifest.applications[appName]
+            }
+
+            if (previousReleaseApp) {
+
+                previousCommit =
+                    previousReleaseApp.git_commit ?:
+                    previousReleaseApp.current_commit ?:
+                    previousReleaseApp.git?.commit ?:
+                    previousReleaseApp.git?.sha ?:
+                    ''
+
+                if (!previousImageTag) {
+                    previousImageTag =
+                        previousReleaseApp.image_tag ?:
+                        previousReleaseApp.image?.tag ?:
+                        ''
+                }
+
+                if (!previousImageDigest) {
+                    previousImageDigest =
+                        previousReleaseApp.image_digest ?:
+                        previousReleaseApp.image?.digest ?:
+                        ''
+                }
+
+                if (previousCommit) {
+
+                    echo ""
+                    echo "Recovered Git commit from previous release snapshot."
+                    echo "Application       : ${appName}"
+                    echo "Previous Release  : ${previousReleaseVersion}"
+                    echo "Recovered Commit  : ${previousCommit}"
+                }
+            }
         }
 
         def currentCommit = ''
@@ -408,8 +547,27 @@ def call(Map config = [:]) {
 
         if (!branchExists) {
 
-            status =
-                'RELEASE_BRANCH_NOT_FOUND'
+            /*
+             * A missing release branch for an application that already
+             * has a UAT artifact means there is no new application build
+             * to perform. Reuse the existing UAT artifact and preserve
+             * its Git commit.
+             */
+            if (previousCommit &&
+                previousImageTag &&
+                previousImageDigest) {
+
+                status =
+                    'NO_RELEASE_BRANCH_REUSE_PREVIOUS'
+
+                action =
+                    'SKIP'
+
+            } else {
+
+                status =
+                    'RELEASE_BRANCH_NOT_FOUND'
+            }
 
         } else if (!previousCommit) {
 
@@ -553,14 +711,35 @@ def call(Map config = [:]) {
                         it.name == app.name
                     }
 
-                previousApp &&
-                app.branchExists &&
-                app.currentCommit &&
-                (
+                if (!previousApp) {
+                    return false
+                }
+
+                def previousSummaryCommit =
                     previousApp.git_commit ?:
                     previousApp.current_commit ?:
                     ''
-                ) == app.currentCommit
+
+                /*
+                 * For applications whose release branch still exists,
+                 * compare the actual release branch commit.
+                 *
+                 * For applications whose release branch does not exist,
+                 * reuse the existing UAT artifact when the orchestrator
+                 * recovered the previous UAT commit and image details.
+                 */
+                if (app.branchExists) {
+
+                    return app.currentCommit &&
+                        previousSummaryCommit == app.currentCommit
+
+                }
+
+                return app.action == 'SKIP' &&
+                    app.currentCommit &&
+                    app.currentCommit == app.previousCommit &&
+                    app.previousImageTag &&
+                    app.previousImageDigest
             }
 
         if (allApplicationsMatch) {
@@ -632,12 +811,20 @@ def call(Map config = [:]) {
                         }
 
                     !previousApp ||
-                    !app.branchExists ||
-                    !app.currentCommit ||
                     (
-                        (previousApp.git_commit ?:
-                         previousApp.current_commit ?:
-                         '') != app.currentCommit
+                        app.branchExists &&
+                        (
+                            !app.currentCommit ||
+                            (
+                                (previousApp.git_commit ?:
+                                 previousApp.current_commit ?:
+                                 '') != app.currentCommit
+                            )
+                        )
+                    ) ||
+                    (
+                        !app.branchExists &&
+                        !app.previousCommit
                     )
                 }
 
