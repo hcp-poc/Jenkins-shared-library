@@ -1,5 +1,35 @@
-
 def call(Map config = [:]) {
+
+    /*
+     * =========================================================
+     * UAT BUILD ORCHESTRATOR
+     *
+     * Target architecture:
+     *
+     * Developer/QA creates release branch
+     *              |
+     *              v
+     *        UAT Build Flow
+     *              |
+     *        Approval 1
+     *              |
+     *      Build changed apps
+     *              |
+     *      Collect metadata
+     *              |
+     *      UAT Release Pipeline
+     *
+     * This pipeline does NOT deploy to UAT.
+     * Deployment is handled by the single central
+     * UAT Release Pipeline.
+     * =========================================================
+     */
+
+    /*
+     * ---------------------------------------------------------
+     * 1. Validate release branch
+     * ---------------------------------------------------------
+     */
 
     if (!config.releaseBranch) {
         error "releaseBranch is required"
@@ -11,7 +41,15 @@ def call(Map config = [:]) {
         error "RELEASE_BRANCH must start with 'release/'"
     }
 
-    def releaseVersion = releaseBranch.replaceFirst(/^release\//, '')
+    def releaseVersion =
+        releaseBranch.replaceFirst(/^release\//, '')
+
+    if (!(releaseVersion ==~ /^\d{4}\.\d{2}\.\d{2}$/)) {
+        error(
+            "Invalid release version '${releaseVersion}'. " +
+            "Expected format: YYYY.MM.##, for example 2026.10.01"
+        )
+    }
 
     echo "=============================================="
     echo "UAT BUILD ORCHESTRATOR"
@@ -20,29 +58,42 @@ def call(Map config = [:]) {
     echo "Release Version: ${releaseVersion}"
     echo "=============================================="
 
+
     /*
      * ---------------------------------------------------------
-     * 1. Load application configuration
+     * 2. Load application configuration
      * ---------------------------------------------------------
      */
 
-    def applicationsYaml = libraryResource(
-        'config/uat-applications.yaml'
-    )
+    def applicationsYaml =
+        libraryResource('config/uat-applications.yaml')
 
-    def applicationsConfig = readYaml(
-        text: applicationsYaml
-    )
+    def applicationsConfig =
+        readYaml(text: applicationsYaml)
 
-    def applications = applicationsConfig.applications
+    def applications =
+        applicationsConfig.applications
 
     if (!applications || applications.isEmpty()) {
         error "No applications found in uat-applications.yaml"
     }
 
+    echo "Applications configured: ${applications.size()}"
+
+    applications.each { app ->
+        echo "  - ${app.name}"
+    }
+
+
     /*
      * ---------------------------------------------------------
-     * 2. Checkout current UAT manifest
+     * 3. Checkout current UAT environment manifest
+     * ---------------------------------------------------------
+     *
+     * hcp-manifest-gitops is used only for release/environment
+     * manifests.
+     *
+     * hcp-artifacts is NOT used here.
      * ---------------------------------------------------------
      */
 
@@ -51,9 +102,14 @@ def call(Map config = [:]) {
         deleteDir()
 
         checkoutApp(
-            repoUrl: 'https://github.com/hcp-poc/hcp-manifest-gitops.git',
-            branch: 'main',
-            credentialsId: 'git-creds'
+            repoUrl:
+                'https://github.com/hcp-poc/hcp-manifest-gitops.git',
+
+            branch:
+                'main',
+
+            credentialsId:
+                'git-creds'
         )
     }
 
@@ -64,21 +120,23 @@ def call(Map config = [:]) {
 
     if (fileExists(manifestFile)) {
 
-        currentManifest = readYaml(
-            file: manifestFile
-        ) ?: [:]
+        currentManifest =
+            readYaml(file: manifestFile) ?: [:]
 
+        echo ""
         echo "Current UAT manifest found."
 
     } else {
 
+        echo ""
         echo "No current UAT manifest found."
-        echo "This will be treated as the first UAT release."
+        echo "This is treated as the first UAT release."
     }
+
 
     /*
      * ---------------------------------------------------------
-     * 3. Compare all applications
+     * 4. Compare release branch against current UAT
      * ---------------------------------------------------------
      */
 
@@ -86,17 +144,50 @@ def call(Map config = [:]) {
 
     applications.each { app ->
 
-        def appName = app.name
-        def repoUrl = app.repository
+        def appName =
+            app.name
+
+        def repoUrl =
+            app.repository
 
         def previousCommit = ''
+        def previousImageTag = ''
+        def previousImageDigest = ''
+
+        /*
+         * Read previous Git commit from UAT manifest.
+         */
 
         if (currentManifest.applications &&
             currentManifest.applications[appName] &&
             currentManifest.applications[appName].git) {
 
             previousCommit =
-                currentManifest.applications[appName].git.commit ?: ''
+                currentManifest
+                    .applications[appName]
+                    .git
+                    .commit ?: ''
+        }
+
+        /*
+         * Read previous immutable image information.
+         */
+
+        if (currentManifest.applications &&
+            currentManifest.applications[appName] &&
+            currentManifest.applications[appName].image) {
+
+            previousImageTag =
+                currentManifest
+                    .applications[appName]
+                    .image
+                    .tag ?: ''
+
+            previousImageDigest =
+                currentManifest
+                    .applications[appName]
+                    .image
+                    .digest ?: ''
         }
 
         def currentCommit = ''
@@ -106,14 +197,17 @@ def call(Map config = [:]) {
 
         echo ""
         echo "----------------------------------------------"
-        echo "Checking: ${appName}"
-        echo "Repository: ${repoUrl}"
-        echo "Release branch: ${releaseBranch}"
-        echo "Previous UAT commit: ${previousCommit ?: 'N/A'}"
+        echo "Application       : ${appName}"
+        echo "Repository        : ${repoUrl}"
+        echo "Release Branch    : ${releaseBranch}"
+        echo "Previous Commit   : ${previousCommit ?: 'N/A'}"
+        echo "Previous Image    : ${previousImageTag ?: 'N/A'}"
+        echo "Previous Digest   : ${previousImageDigest ?: 'N/A'}"
         echo "----------------------------------------------"
 
+
         /*
-         * Checkout requested release branch.
+         * Checkout the release branch.
          */
 
         try {
@@ -123,23 +217,32 @@ def call(Map config = [:]) {
                 deleteDir()
 
                 checkoutApp(
-                    repoUrl: repoUrl,
-                    branch: releaseBranch,
-                    credentialsId: 'git-creds'
+                    repoUrl:
+                        repoUrl,
+
+                    branch:
+                        releaseBranch,
+
+                    credentialsId:
+                        'git-creds'
                 )
 
                 branchExists = true
 
                 currentCommit = sh(
-                    script: 'git rev-parse HEAD',
-                    returnStdout: true
+                    script:
+                        'git rev-parse HEAD',
+
+                    returnStdout:
+                        true
                 ).trim()
 
-                echo "Current release commit: ${currentCommit}"
+                echo "Current Release Commit: ${currentCommit}"
+
 
                 /*
-                 * Get commits between previous UAT commit
-                 * and current release commit.
+                 * Calculate commits between the current
+                 * UAT commit and the release branch commit.
                  */
 
                 if (previousCommit &&
@@ -150,47 +253,60 @@ def call(Map config = [:]) {
                             git log ${previousCommit}..${currentCommit} \
                             --pretty=format:'%H|%s'
                         """,
-                        returnStdout: true
+
+                        returnStdout:
+                            true
                     ).trim()
 
                     if (commitOutput) {
 
-                        commitOutput.split('\\n').each { line ->
+                        commitOutput
+                            .split('\\n')
+                            .each { line ->
 
-                            def parts = line.split(
-                                '\\|',
-                                2
-                            )
+                                def parts =
+                                    line.split('\\|', 2)
 
-                            commits << [
-                                commit : parts[0],
-                                message: parts.size() > 1
-                                    ? parts[1]
-                                    : ''
-                            ]
-                        }
+                                commits << [
 
-                        commitCount = commits.size()
+                                    commit:
+                                        parts[0],
+
+                                    message:
+                                        parts.size() > 1
+                                            ? parts[1]
+                                            : ''
+                                ]
+                            }
+
+                        commitCount =
+                            commits.size()
                     }
                 }
             }
 
         } catch (Exception e) {
 
-            def errorMessage = e.getMessage() ?: ''
+            def errorMessage =
+                e.getMessage() ?: ''
 
             /*
-             * Treat only an actual missing revision/branch
-             * as a missing release branch.
+             * Only a genuinely missing branch is treated
+             * as RELEASE_BRANCH_NOT_FOUND.
              *
-             * Other Git, credential, network or Jenkins errors
+             * Credential, Git, network and Jenkins errors
              * must fail the pipeline.
              */
 
-            if (errorMessage.contains("Couldn't find any revision") ||
-                errorMessage.contains("does not exist")) {
+            if (errorMessage.contains(
+                    "Couldn't find any revision"
+                ) ||
+                errorMessage.contains(
+                    "does not exist"
+                )) {
 
-                echo "Release branch does not exist for ${appName}"
+                echo ""
+                echo "Release branch not found for ${appName}"
 
                 branchExists = false
                 currentCommit = ''
@@ -203,6 +319,7 @@ def call(Map config = [:]) {
             }
         }
 
+
         /*
          * -----------------------------------------------------
          * Determine BUILD / SKIP
@@ -214,47 +331,168 @@ def call(Map config = [:]) {
 
         if (!branchExists) {
 
-            status = 'RELEASE_BRANCH_NOT_FOUND'
+            status =
+                'RELEASE_BRANCH_NOT_FOUND'
 
         } else if (!previousCommit) {
 
-            status = 'FIRST_UAT_RELEASE'
-            action = 'BUILD'
+            /*
+             * First UAT release.
+             * If the application has the release branch,
+             * it must be built.
+             */
+
+            status =
+                'FIRST_UAT_RELEASE'
+
+            action =
+                'BUILD'
 
         } else if (previousCommit != currentCommit) {
 
-            status = 'CODE_CHANGED'
-            action = 'BUILD'
+            status =
+                'CODE_CHANGED'
+
+            action =
+                'BUILD'
 
         } else {
 
-            status = 'NO_CODE_CHANGE'
-            action = 'SKIP'
+            status =
+                'NO_CODE_CHANGE'
+
+            action =
+                'SKIP'
         }
 
+
         comparison << [
-            name            : appName,
-            repository      : repoUrl,
-            releaseBranch   : releaseBranch,
-            branchExists    : branchExists,
-            previousCommit  : previousCommit,
-            currentCommit   : currentCommit,
-            commitCount     : commitCount,
-            commits         : commits,
-            status          : status,
-            action          : action,
-            buildJob        : app.build_job,
-            imageRepository : app.image_repository
+
+            name:
+                appName,
+
+            repository:
+                repoUrl,
+
+            releaseBranch:
+                releaseBranch,
+
+            branchExists:
+                branchExists,
+
+            previousCommit:
+                previousCommit,
+
+            currentCommit:
+                currentCommit,
+
+            previousImageTag:
+                previousImageTag,
+
+            previousImageDigest:
+                previousImageDigest,
+
+            commitCount:
+                commitCount,
+
+            commits:
+                commits,
+
+            status:
+                status,
+
+            action:
+                action,
+
+            buildJob:
+                app.build_job,
+
+            imageRepository:
+                app.image_repository,
+
+            jenkinsJob:
+                '',
+
+            jenkinsBuild:
+                '',
+
+            buildResult:
+                '',
+
+            imageTag:
+                '',
+
+            imageDigest:
+                ''
         ]
     }
 
+
     /*
      * ---------------------------------------------------------
-     * 4. Build Approval 1 message
+     * 5. Display complete comparison
      * ---------------------------------------------------------
      */
 
-    def approvalMessage = new StringBuilder()
+    echo ""
+    echo "=============================================================="
+    echo "UAT RELEASE COMPARISON"
+    echo "=============================================================="
+
+    comparison.each { app ->
+
+        echo ""
+        echo "Application      : ${app.name}"
+        echo "Release Branch   : ${app.branchExists ? app.releaseBranch : 'NOT FOUND'}"
+        echo "Previous Commit  : ${app.previousCommit ?: 'N/A'}"
+        echo "Current Commit   : ${app.currentCommit ?: 'N/A'}"
+        echo "Commit Count     : ${app.commitCount}"
+        echo "Status           : ${app.status}"
+        echo "Action           : ${app.action}"
+
+        if (app.action == 'SKIP') {
+
+            echo "Previous Image   : ${app.previousImageTag ?: 'N/A'}"
+            echo "Previous Digest  : ${app.previousImageDigest ?: 'N/A'}"
+        }
+
+        if (app.commits) {
+
+            echo "Commits between releases:"
+
+            app.commits.each { commit ->
+
+                echo(
+                    "  ${commit.commit} - ${commit.message}"
+                )
+            }
+        }
+    }
+
+
+    /*
+     * ---------------------------------------------------------
+     * 6. Prepare Approval 1
+     * ---------------------------------------------------------
+     */
+
+    def buildApps =
+        comparison.findAll {
+            it.action == 'BUILD'
+        }
+
+    def skipApps =
+        comparison.findAll {
+            it.action == 'SKIP'
+        }
+
+    def missingApps =
+        comparison.findAll {
+            !it.branchExists
+        }
+
+    def approvalMessage =
+        new StringBuilder()
 
     approvalMessage.append(
         "UAT PRE-BUILD APPROVAL\n"
@@ -287,15 +525,18 @@ def call(Map config = [:]) {
         )
 
         approvalMessage.append(
-            "Release Branch   : ${app.branchExists ? app.releaseBranch : 'NOT FOUND'}\n"
+            "Branch Status    : " +
+            "${app.branchExists ? 'FOUND' : 'NOT FOUND'}\n"
         )
 
         approvalMessage.append(
-            "Previous Commit  : ${app.previousCommit ?: 'N/A'}\n"
+            "Previous Commit  : " +
+            "${app.previousCommit ?: 'N/A'}\n"
         )
 
         approvalMessage.append(
-            "Current Commit   : ${app.currentCommit ?: 'N/A'}\n"
+            "Current Commit   : " +
+            "${app.currentCommit ?: 'N/A'}\n"
         )
 
         approvalMessage.append(
@@ -310,17 +551,22 @@ def call(Map config = [:]) {
             "Action           : ${app.action}\n"
         )
 
+        if (app.action == 'SKIP') {
+
+            approvalMessage.append(
+                "Current UAT Image : " +
+                "${app.previousImageTag ?: 'N/A'}\n"
+            )
+
+            approvalMessage.append(
+                "Current UAT Digest: " +
+                "${app.previousImageDigest ?: 'N/A'}\n"
+            )
+        }
+
         approvalMessage.append(
             "----------------------------------------------\n"
         )
-    }
-
-    def buildApps = comparison.findAll {
-        it.action == 'BUILD'
-    }
-
-    def skipApps = comparison.findAll {
-        it.action == 'SKIP'
     }
 
     approvalMessage.append("\n")
@@ -333,152 +579,503 @@ def call(Map config = [:]) {
         "SKIP applications : ${skipApps.size()}\n"
     )
 
+    approvalMessage.append(
+        "Missing branches  : ${missingApps.size()}\n"
+    )
+
     approvalMessage.append("\n")
 
     approvalMessage.append(
         "Approve to start the UAT application builds?"
     )
 
-    /*
-     * ---------------------------------------------------------
-     * 5. Print comparison to Jenkins console
-     * ---------------------------------------------------------
-     */
-
-    echo ""
-    echo "=============================================================="
-    echo "UAT RELEASE COMPARISON"
-    echo "=============================================================="
-
-    comparison.each { app ->
-
-        echo ""
-        echo "Application      : ${app.name}"
-        echo "Release Branch   : ${app.branchExists ? app.releaseBranch : 'NOT FOUND'}"
-        echo "Previous Commit  : ${app.previousCommit ?: 'N/A'}"
-        echo "Current Commit   : ${app.currentCommit ?: 'N/A'}"
-        echo "Commit Count     : ${app.commitCount}"
-        echo "Status           : ${app.status}"
-        echo "Action           : ${app.action}"
-
-        if (app.commits) {
-
-            echo "Commits between releases:"
-
-            app.commits.each { commit ->
-
-                echo "  ${commit.commit} - ${commit.message}"
-            }
-        }
-    }
 
     /*
      * ---------------------------------------------------------
-     * 6. APPROVAL 1 - PRE BUILD
+     * 7. APPROVAL 1 - BEFORE ANY BUILD
      * ---------------------------------------------------------
      */
 
     stage('Approval 1 - Pre-Build') {
 
         input(
-            message: approvalMessage.toString(),
-            ok: 'Approve UAT Build',
-            submitter: 'Nikhil,Ravi'
+            message:
+                approvalMessage.toString(),
+
+            ok:
+                'Approve UAT Build',
+
+            submitter:
+                'Nikhil,Ravi'
         )
     }
 
+
     /*
      * ---------------------------------------------------------
-     * 7. Trigger changed application builds
+     * 8. Build changed applications in parallel
      * ---------------------------------------------------------
      */
 
-    if (buildApps.isEmpty()) {
+    def buildResults = [:]
+
+    if (!buildApps.isEmpty()) {
+
+        stage('Build Changed Applications') {
+
+            def parallelBuilds = [:]
+
+            buildApps.each { app ->
+
+                def appData = app
+
+                parallelBuilds[app.name] = {
+
+                    echo ""
+                    echo "=============================================="
+                    echo "Starting UAT Build"
+                    echo "Application: ${appData.name}"
+                    echo "=============================================="
+
+                    def buildRun = build(
+
+                        job:
+                            appData.buildJob,
+
+                        wait:
+                            true,
+
+                        propagate:
+                            true,
+
+                        parameters: [
+
+                            string(
+                                name:
+                                    'RELEASE_BRANCH',
+
+                                value:
+                                    releaseBranch
+                            ),
+
+                            string(
+                                name:
+                                    'RELEASE_VERSION',
+
+                                value:
+                                    releaseVersion
+                            )
+                        ]
+                    )
+
+                    buildResults[appData.name] = [
+
+                        job:
+                            appData.buildJob,
+
+                        buildNumber:
+                            buildRun.number,
+
+                        result:
+                            buildRun.result
+                    ]
+
+                    echo ""
+                    echo "Completed UAT Build"
+                    echo "Application : ${appData.name}"
+                    echo "Job         : ${appData.buildJob}"
+                    echo "Build       : ${buildRun.number}"
+                    echo "Result      : ${buildRun.result}"
+                }
+            }
+
+            parallel parallelBuilds
+        }
+
+    } else {
 
         echo ""
         echo "No applications require a new UAT build."
-        echo "UAT Build Orchestrator completed."
-
-        return comparison
     }
 
-    stage('Build Changed Applications') {
 
-        def buildResults = [:]
+    /*
+     * ---------------------------------------------------------
+     * 9. Collect build metadata from application builds
+     * ---------------------------------------------------------
+     *
+     * Application build pipelines already archive:
+     *
+     *   build-metadata.yaml
+     *   image-digest.txt
+     *
+     * Copy Artifact retrieves those files from the exact
+     * build number triggered above.
+     *
+     * This provides:
+     *
+     *   Git commit
+     *   Jenkins job
+     *   Jenkins build
+     *   Image tag
+     *   SHA256 digest
+     * ---------------------------------------------------------
+     */
 
-        def parallelBuilds = [:]
+    stage('Collect Build Metadata') {
 
-        buildApps.each { app ->
+        buildResults.each { appName, result ->
 
-            def appData = app
+            def appData =
+                comparison.find {
+                    it.name == appName
+                }
 
-            parallelBuilds[app.name] = {
+            if (!appData) {
+
+                error(
+                    "Application ${appName} not found in comparison"
+                )
+            }
+
+            def outputDirectory =
+                "build-output-${appName}"
+
+            dir(outputDirectory) {
+
+                deleteDir()
+
+                copyArtifacts(
+
+                    projectName:
+                        result.job,
+
+                    selector:
+                        specific("${result.buildNumber}"),
+
+                    filter:
+                        'build-metadata.yaml,image-digest.txt',
+
+                    fingerprintArtifacts:
+                        true
+                )
+
+                if (!fileExists(
+                        'build-metadata.yaml'
+                    )) {
+
+                    error(
+                        "build-metadata.yaml not found for ${appName}"
+                    )
+                }
+
+                if (!fileExists(
+                        'image-digest.txt'
+                    )) {
+
+                    error(
+                        "image-digest.txt not found for ${appName}"
+                    )
+                }
+
+                def metadata =
+                    readYaml(
+                        file:
+                            'build-metadata.yaml'
+                    )
+
+                def imageDigest =
+                    readFile(
+                        'image-digest.txt'
+                    ).trim()
+
+                if (!imageDigest) {
+
+                    error(
+                        "Image digest is empty for ${appName}"
+                    )
+                }
+
+                appData.jenkinsJob =
+                    metadata.jenkins.job
+
+                appData.jenkinsBuild =
+                    metadata.jenkins.build_number
+
+                appData.imageTag =
+                    metadata.image.tag
+
+                appData.imageDigest =
+                    imageDigest
+
+                appData.buildResult =
+                    result.result
 
                 echo ""
                 echo "=============================================="
-                echo "Starting UAT build: ${appData.name}"
+                echo "BUILD METADATA"
                 echo "=============================================="
-
-                def buildRun = build(
-                    job: appData.buildJob,
-                    wait: true,
-                    propagate: true,
-                    parameters: [
-                        string(
-                            name: 'RELEASE_BRANCH',
-                            value: releaseBranch
-                        ),
-                        string(
-                            name: 'RELEASE_VERSION',
-                            value: releaseVersion
-                        )
-                    ]
-                )
-
-                buildResults[appData.name] = [
-                    job         : appData.buildJob,
-                    buildNumber : buildRun.number,
-                    result      : buildRun.result
-                ]
-
-                echo "Completed: ${appData.name}"
-                echo "Build Number: ${buildRun.number}"
+                echo "Application    : ${appName}"
+                echo "Jenkins Job    : ${appData.jenkinsJob}"
+                echo "Jenkins Build  : ${appData.jenkinsBuild}"
+                echo "Image Tag      : ${appData.imageTag}"
+                echo "Image Digest   : ${appData.imageDigest}"
+                echo "=============================================="
             }
         }
 
-        parallel parallelBuilds
 
         /*
          * -----------------------------------------------------
-         * 8. Build summary
+         * Preserve immutable image information for SKIP apps.
          * -----------------------------------------------------
          */
 
-        echo ""
-        echo "=============================================================="
-        echo "UAT BUILD SUMMARY"
-        echo "=============================================================="
-
         comparison.each { app ->
 
-            if (buildResults.containsKey(app.name)) {
+            if (app.action == 'SKIP') {
 
-                def result = buildResults[app.name]
+                app.imageTag =
+                    app.previousImageTag
 
-                echo "${app.name}"
-                echo "  Action       : BUILD"
-                echo "  Jenkins Job  : ${result.job}"
-                echo "  Build Number : ${result.buildNumber}"
-                echo "  Result       : ${result.result}"
+                app.imageDigest =
+                    app.previousImageDigest
 
-            } else {
+                app.buildResult =
+                    'SKIPPED'
 
-                echo "${app.name}"
-                echo "  Action       : ${app.action}"
-                echo "  Build        : Not triggered"
+                echo ""
+                echo "=============================================="
+                echo "UNCHANGED APPLICATION"
+                echo "=============================================="
+                echo "Application   : ${app.name}"
+                echo "Action        : SKIP"
+                echo "Image Tag     : ${app.imageTag ?: 'N/A'}"
+                echo "Image Digest  : ${app.imageDigest ?: 'N/A'}"
+                echo "=============================================="
             }
         }
     }
+
+
+    /*
+     * ---------------------------------------------------------
+     * 10. Validate collected build information
+     * ---------------------------------------------------------
+     *
+     * Every application must have the information required
+     * by the central UAT Release Pipeline.
+     * ---------------------------------------------------------
+     */
+
+    stage('Validate Build Information') {
+
+        comparison.each { app ->
+
+            if (!app.branchExists) {
+                return
+            }
+
+            if (!app.currentCommit) {
+
+                error(
+                    "Missing Git commit for ${app.name}"
+                )
+            }
+
+            if (!app.imageTag) {
+
+                error(
+                    "Missing image tag for ${app.name}"
+                )
+            }
+
+            if (!app.imageDigest) {
+
+                error(
+                    "Missing image digest for ${app.name}"
+                )
+            }
+
+            echo(
+                "Validated build information for ${app.name}"
+            )
+        }
+    }
+
+
+    /*
+     * ---------------------------------------------------------
+     * 11. Create complete UAT build handoff summary
+     * ---------------------------------------------------------
+     *
+     * This artifact is consumed by ONE central:
+     *
+     *     UAT/uat-release
+     *
+     * It contains information for ALL applications.
+     * ---------------------------------------------------------
+     */
+
+    stage('Create UAT Build Summary') {
+
+        def summary = [
+
+            environment:
+                'uat',
+
+            release:
+                releaseVersion,
+
+            release_branch:
+                releaseBranch,
+
+            created_by:
+                env.BUILD_USER ?: 'Jenkins',
+
+            orchestrator_job:
+                env.JOB_NAME,
+
+            orchestrator_build:
+                env.BUILD_NUMBER,
+
+            applications:
+                comparison.collect { app ->
+
+                    [
+
+                        name:
+                            app.name,
+
+                        repository:
+                            app.repository,
+
+                        branch:
+                            app.releaseBranch,
+
+                        branch_exists:
+                            app.branchExists,
+
+                        previous_commit:
+                            app.previousCommit,
+
+                        current_commit:
+                            app.currentCommit,
+
+                        commit_count:
+                            app.commitCount,
+
+                        status:
+                            app.status,
+
+                        action:
+                            app.action,
+
+                        build_job:
+                            app.jenkinsJob ?: app.buildJob,
+
+                        build_number:
+                            app.jenkinsBuild ?: '',
+
+                        build_result:
+                            app.buildResult ?: '',
+
+                        image_repository:
+                            app.imageRepository,
+
+                        image_tag:
+                            app.imageTag ?: '',
+
+                        image_digest:
+                            app.imageDigest ?: '',
+
+                        previous_image_tag:
+                            app.previousImageTag ?: '',
+
+                        previous_image_digest:
+                            app.previousImageDigest ?: '',
+
+                        commits:
+                            app.commits
+                    ]
+                ]
+        ]
+
+        writeYaml(
+            file:
+                'uat-build-summary.yaml',
+
+            data:
+                summary,
+
+            overwrite:
+                true
+        )
+
+        echo ""
+        echo "=============================================================="
+        echo "UAT BUILD HANDOFF SUMMARY"
+        echo "=============================================================="
+
+        sh(
+            script:
+                'cat uat-build-summary.yaml'
+        )
+
+        archiveArtifacts(
+            artifacts:
+                'uat-build-summary.yaml',
+
+            fingerprint:
+                true
+        )
+    }
+
+
+    /*
+     * ---------------------------------------------------------
+     * 12. Final summary
+     * ---------------------------------------------------------
+     */
+
+    echo ""
+    echo "=============================================================="
+    echo "FINAL UAT BUILD SUMMARY"
+    echo "=============================================================="
+
+    comparison.each { app ->
+
+        echo ""
+        echo "Application    : ${app.name}"
+        echo "Action         : ${app.action}"
+        echo "Git Commit     : ${app.currentCommit ?: 'N/A'}"
+        echo "Jenkins Job    : ${app.jenkinsJob ?: app.buildJob}"
+        echo "Jenkins Build  : ${app.jenkinsBuild ?: 'N/A'}"
+        echo "Image          : ${app.imageRepository}:${app.imageTag ?: 'N/A'}"
+        echo "Digest         : ${app.imageDigest ?: 'N/A'}"
+    }
+
+    echo ""
+    echo "=============================================================="
+    echo "UAT BUILD ORCHESTRATOR COMPLETED"
+    echo "=============================================================="
+    echo "Release Version : ${releaseVersion}"
+    echo "Build Summary   : uat-build-summary.yaml"
+    echo "Next Pipeline   : UAT/uat-release"
+    echo "=============================================================="
+
+
+    /*
+     * ---------------------------------------------------------
+     * 13. Workspace cleanup - LAST
+     * ---------------------------------------------------------
+     */
+
+    stage('Workspace Cleanup') {
+
+        deleteDir()
+    }
+
 
     return comparison
 }
