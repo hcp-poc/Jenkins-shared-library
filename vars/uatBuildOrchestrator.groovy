@@ -136,7 +136,72 @@ def call(Map config = [:]) {
 
     /*
      * ---------------------------------------------------------
-     * 4. Compare release branch against current UAT
+     * 4. Load previous successful UAT build summary
+     * ---------------------------------------------------------
+     *
+     * This is used to protect a release from being rebuilt.
+     * If the same release version/branch was already built
+     * successfully and the release branch commits are unchanged,
+     * the existing build artifacts are reused.
+     * ---------------------------------------------------------
+     */
+
+    def previousBuildSummary = [:]
+    def previousBuildSummaryFile =
+        'previous-uat-build/uat-build-summary.yaml'
+
+    try {
+
+        dir('previous-uat-build') {
+
+            deleteDir()
+
+            copyArtifacts(
+                projectName:
+                    'UAT/uat-build',
+
+                selector:
+                    lastSuccessful(),
+
+                filter:
+                    'uat-build-summary.yaml',
+
+                fingerprintArtifacts:
+                    true
+            )
+        }
+
+        if (fileExists(previousBuildSummaryFile)) {
+
+            previousBuildSummary =
+                readYaml(
+                    file:
+                        previousBuildSummaryFile
+                ) ?: [:]
+
+            echo ""
+            echo "Previous successful UAT build found."
+            echo "Previous Release : ${previousBuildSummary.release ?: 'N/A'}"
+            echo "Previous Branch  : ${previousBuildSummary.release_branch ?: 'N/A'}"
+
+        } else {
+
+            echo ""
+            echo "No previous UAT build summary found."
+            echo "This is treated as the first UAT build."
+        }
+
+    } catch (Exception e) {
+
+        echo ""
+        echo "No previous successful UAT build artifact available."
+        echo "This is treated as the first UAT build."
+    }
+
+
+    /*
+     * ---------------------------------------------------------
+     * 5. Compare release branch against current UAT
      * ---------------------------------------------------------
      */
 
@@ -155,39 +220,51 @@ def call(Map config = [:]) {
         def previousImageDigest = ''
 
         /*
-         * Read previous Git commit from UAT manifest.
+         * Read previous Git commit and image information from
+         * the current UAT environment manifest.
+         *
+         * The manifest stores applications as a YAML list:
+         *
+         * applications:
+         *   - name: nextjs-app-1
+         *     git_commit: ...
+         *
+         * Support both the current list structure and the older
+         * map-style structure.
          */
 
-        if (currentManifest.applications &&
-            currentManifest.applications[appName] &&
-            currentManifest.applications[appName].git) {
+        def previousManifestApp = null
 
-            previousCommit =
-                currentManifest
-                    .applications[appName]
-                    .git
-                    .commit ?: ''
+        if (currentManifest.applications instanceof List) {
+
+            previousManifestApp =
+                currentManifest.applications.find {
+                    it.name == appName
+                }
+
+        } else if (currentManifest.applications instanceof Map) {
+
+            previousManifestApp =
+                currentManifest.applications[appName]
         }
 
-        /*
-         * Read previous immutable image information.
-         */
+        if (previousManifestApp) {
 
-        if (currentManifest.applications &&
-            currentManifest.applications[appName] &&
-            currentManifest.applications[appName].image) {
+            previousCommit =
+                previousManifestApp.git_commit ?:
+                previousManifestApp.current_commit ?:
+                previousManifestApp.git?.commit ?:
+                ''
 
             previousImageTag =
-                currentManifest
-                    .applications[appName]
-                    .image
-                    .tag ?: ''
+                previousManifestApp.image_tag ?:
+                previousManifestApp.image?.tag ?:
+                ''
 
             previousImageDigest =
-                currentManifest
-                    .applications[appName]
-                    .image
-                    .digest ?: ''
+                previousManifestApp.image_digest ?:
+                previousManifestApp.image?.digest ?:
+                ''
         }
 
         def currentCommit = ''
@@ -430,7 +507,145 @@ def call(Map config = [:]) {
 
     /*
      * ---------------------------------------------------------
-     * 5. Display complete comparison
+     * Same-release rebuild protection
+     * ---------------------------------------------------------
+     *
+     * A release branch is considered frozen for a release version.
+     *
+     * If the same release was already built successfully:
+     *
+     *   - same release branch
+     *   - same commit for every application
+     *
+     * then do NOT rebuild any application.
+     *
+     * If the same release version has moved to a different
+     * commit, fail the pipeline and require a new release version.
+     * ---------------------------------------------------------
+     */
+
+    def sameReleaseAlreadyBuilt = false
+
+    if (previousBuildSummary &&
+        previousBuildSummary.release == releaseVersion &&
+        previousBuildSummary.release_branch == releaseBranch &&
+        previousBuildSummary.applications) {
+
+        def previousApplications =
+            previousBuildSummary.applications
+
+        def allApplicationsMatch =
+            comparison.every { app ->
+
+                def previousApp =
+                    previousApplications.find {
+                        it.name == app.name
+                    }
+
+                previousApp &&
+                app.branchExists &&
+                app.currentCommit &&
+                (
+                    previousApp.git_commit ?:
+                    previousApp.current_commit ?:
+                    ''
+                ) == app.currentCommit
+            }
+
+        if (allApplicationsMatch) {
+
+            sameReleaseAlreadyBuilt = true
+
+            echo ""
+            echo "=============================================================="
+            echo "SAME RELEASE ALREADY BUILT"
+            echo "=============================================================="
+            echo "Release Version : ${releaseVersion}"
+            echo "Release Branch  : ${releaseBranch}"
+            echo "Action          : REUSE EXISTING BUILD"
+            echo "No application will be rebuilt."
+            echo "=============================================================="
+
+            comparison.each { app ->
+
+                def previousApp =
+                    previousApplications.find {
+                        it.name == app.name
+                    }
+
+                app.action =
+                    'SKIP'
+
+                app.status =
+                    'SAME_RELEASE_ALREADY_BUILT'
+
+                app.jenkinsJob =
+                    previousApp.jenkins?.job ?:
+                    previousApp.build_job ?:
+                    app.buildJob
+
+                app.jenkinsBuild =
+                    previousApp.jenkins?.build_number ?:
+                    previousApp.build_number ?:
+                    ''
+
+                app.imageTag =
+                    previousApp.image_tag ?:
+                    ''
+
+                app.imageDigest =
+                    previousApp.image_digest ?:
+                    ''
+
+                app.buildResult =
+                    'REUSED'
+
+                echo ""
+                echo "Application    : ${app.name}"
+                echo "Git Commit     : ${app.currentCommit}"
+                echo "Existing Job   : ${app.jenkinsJob}"
+                echo "Existing Build : ${app.jenkinsBuild}"
+                echo "Image Tag      : ${app.imageTag}"
+                echo "Image Digest   : ${app.imageDigest}"
+                echo "Action         : REUSE"
+            }
+
+        } else {
+
+            def changedApplications =
+                comparison.findAll { app ->
+
+                    def previousApp =
+                        previousApplications.find {
+                            it.name == app.name
+                        }
+
+                    !previousApp ||
+                    !app.branchExists ||
+                    !app.currentCommit ||
+                    (
+                        (previousApp.git_commit ?:
+                         previousApp.current_commit ?:
+                         '') != app.currentCommit
+                    )
+                }
+
+            if (!changedApplications.isEmpty()) {
+
+                error(
+                    "Release ${releaseVersion} was already built successfully, " +
+                    "but the release branch now has different application commits: " +
+                    changedApplications.collect { it.name }.join(', ') +
+                    ". Create a new release version instead of rebuilding the same release."
+                )
+            }
+        }
+    }
+
+
+    /*
+     * ---------------------------------------------------------
+     * 6. Display complete comparison
      * ---------------------------------------------------------
      */
 
@@ -598,16 +813,25 @@ def call(Map config = [:]) {
 
     stage('Approval 1 - Pre-Build') {
 
-        input(
-            message:
-                approvalMessage.toString(),
+        if (!buildApps.isEmpty()) {
 
-            ok:
-                'Approve UAT Build',
+            input(
+                message:
+                    approvalMessage.toString(),
 
-            submitter:
-                'Nikhil,Ravi'
-        )
+                ok:
+                    'Approve UAT Build',
+
+                submitter:
+                    'Nikhil,Ravi'
+            )
+
+        } else {
+
+            echo ""
+            echo "No application builds are required."
+            echo "Approval 1 is not required for this run."
+        }
     }
 
 
@@ -833,7 +1057,8 @@ def call(Map config = [:]) {
 
         comparison.each { app ->
 
-            if (app.action == 'SKIP') {
+            if (app.action == 'SKIP' &&
+                app.status != 'SAME_RELEASE_ALREADY_BUILT') {
 
                 app.imageTag =
                     app.previousImageTag
