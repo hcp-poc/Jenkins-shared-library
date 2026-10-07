@@ -962,6 +962,9 @@ def call(Map config = [:]) {
                         current_commit:
                             app.currentCommit,
 
+                        git_commit:
+                            app.currentCommit,
+
                         commit_count:
                             app.commitCount,
 
