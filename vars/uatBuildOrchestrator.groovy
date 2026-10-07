@@ -166,7 +166,7 @@ def call(Map config = [:]) {
             releaseManifestPaths.split('\\n').each { path ->
 
                 def match =
-                    (path =~ /uat-manifest\/releases\/(\\d{4}\.\\d{2}\.\\d{2})\/manifest\.yaml/)
+                    (path =~ /uat-manifest\/releases\/(\d{4}\.\d{2}\.\d{2})\/manifest\.yaml/)
 
                 if (match.find()) {
 
