@@ -442,6 +442,17 @@ def call(Map config = [:]) {
                 'SKIP'
         }
 
+        /*
+         * An unchanged application is not missing its Git commit.
+         * It continues to use the exact artifact already deployed in UAT,
+         * so its current UAT commit must remain the previous UAT commit.
+         * This is also required for the UAT handoff summary and environment
+         * manifest to retain complete Git traceability for SKIP applications.
+         */
+        if (action == 'SKIP' && previousCommit) {
+            currentCommit = previousCommit
+        }
+
 
         comparison << [
 
