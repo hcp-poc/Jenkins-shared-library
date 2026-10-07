@@ -998,7 +998,7 @@ def call(Map config = [:]) {
                         commits:
                             app.commits
                     ]
-                ]
+                }
         ]
 
         writeYaml(
