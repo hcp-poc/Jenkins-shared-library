@@ -237,17 +237,10 @@ def call(Map config = [:]) {
             deleteDir()
 
             copyArtifacts(
-                projectName:
-                    'UAT/uat-build',
-
-                selector:
-                    lastSuccessful(),
-
-                filter:
-                    'uat-build-summary.yaml',
-
-                fingerprintArtifacts:
-                    true
+                projectName: 'UAT/uat-build',
+                selector: [$class: 'StatusBuildSelector', stable: false],
+                filter: 'uat-build-summary.yaml',
+                fingerprintArtifacts: true
             )
         }
 
@@ -1168,18 +1161,13 @@ def call(Map config = [:]) {
                 deleteDir()
 
                 copyArtifacts(
-
-                    projectName:
-                        result.job,
-
-                    selector:
-                        specific("${result.buildNumber}"),
-
-                    filter:
-                        'build-metadata.yaml,image-digest.txt',
-
-                    fingerprintArtifacts:
-                        true
+                    projectName: result.job,
+                    selector: [
+                        $class: 'SpecificBuildSelector',
+                        buildNumber: "${result.buildNumber}"
+                    ],
+                    filter: 'build-metadata.yaml,image-digest.txt',
+                    fingerprintArtifacts: true
                 )
 
                 if (!fileExists(
