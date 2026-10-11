@@ -1192,7 +1192,7 @@ def call(Map config = [:]) {
                     readYaml(
                         file:
                             'build-metadata.yaml'
-                    )
+                    ) ?: [:]
 
                 def imageDigest =
                     readFile(
@@ -1200,26 +1200,34 @@ def call(Map config = [:]) {
                     ).trim()
 
                 if (!imageDigest) {
-
-                    error(
-                        "Image digest is empty for ${appName}"
-                    )
+                    error("Image digest is empty for ${appName}")
                 }
 
+                // Support both nested and flat build-metadata.yaml formats.
                 appData.jenkinsJob =
-                    metadata.jenkins.job
+                    metadata.jenkins?.job ?:
+                    metadata.jenkins_job ?:
+                    metadata.build_job ?:
+                    result.job ?:
+                    appData.buildJob
 
                 appData.jenkinsBuild =
-                    metadata.jenkins.build_number
+                    metadata.jenkins?.build_number ?:
+                    metadata.jenkins_build_number ?:
+                    metadata.build_number ?:
+                    result.buildNumber
 
                 appData.imageTag =
-                    metadata.image.tag
+                    metadata.image?.tag ?:
+                    metadata.image_tag ?:
+                    ''
 
-                appData.imageDigest =
-                    imageDigest
+                appData.imageDigest = imageDigest
+                appData.buildResult = result.result
 
-                appData.buildResult =
-                    result.result
+                if (!appData.imageTag) {
+                    error("Image tag is missing in build-metadata.yaml for ${appName}")
+                }
 
                 echo ""
                 echo "=============================================="
