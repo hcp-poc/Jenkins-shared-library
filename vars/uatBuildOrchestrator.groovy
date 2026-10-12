@@ -13,7 +13,7 @@ def call(Map config = [:]) {
      *              |
      *        Approval 1
      *              |
-     *      Build changed apps
+     *      Build applications with the requested release branch
      *              |
      *      Collect metadata
      *              |
@@ -131,6 +131,35 @@ def call(Map config = [:]) {
         echo ""
         echo "No current UAT manifest found."
         echo "This is treated as the first UAT release."
+    }
+
+    /*
+     * ---------------------------------------------------------
+     * 3B. Validate requested release against deployed UAT release
+     * ---------------------------------------------------------
+     * The current UAT environment manifest is the source of truth.
+     * A release already deployed to UAT must never be built again.
+     * Release versions use fixed-width YYYY.MM.DD format, so string
+     * ordering is chronological for these validated versions.
+     */
+
+    def deployedReleaseVersion = (currentManifest.release ?: '').toString().trim()
+
+    if (deployedReleaseVersion) {
+        if (!(deployedReleaseVersion ==~ /^\d{4}\.\d{2}\.\d{2}$/)) {
+            error("Current UAT manifest has an invalid release version '${deployedReleaseVersion}'.")
+        }
+
+        if (releaseVersion <= deployedReleaseVersion) {
+            error(
+                "Release '${releaseVersion}' cannot be built because the current UAT manifest " +
+                "already records '${deployedReleaseVersion}' as the deployed release. " +
+                "Use a new release version greater than '${deployedReleaseVersion}'."
+            )
+        }
+
+        echo "Current deployed UAT release: ${deployedReleaseVersion}"
+        echo "Requested release is newer and can be evaluated: ${releaseVersion}"
     }
 
     /*
@@ -274,9 +303,8 @@ def call(Map config = [:]) {
 
     /*
      * ---------------------------------------------------------
-     * 5. Compare optional per-application release branches against current UAT
-     *    - Branch exists and commit changed: BUILD
-     *    - Branch exists and commit is unchanged: SKIP
+     * 5. Check requested release branch in each application repository
+     *    - Branch exists: BUILD, regardless of commit differences
      *    - Branch absent and current UAT artifact is reusable: SKIP/reuse
      * ---------------------------------------------------------
      */
@@ -543,81 +571,26 @@ def call(Map config = [:]) {
 
         if (!branchExists) {
 
-            /*
-             * Release branches are required only for applications that
-             * have code changes in this release. If the branch is absent,
-             * reuse the exact image currently deployed in UAT and skip
-             * building this application.
-             *
-             * A missing branch is safe to skip only when the current UAT
-             * manifest (or its recovered release snapshot) provides the
-             * previous commit, image tag, and immutable image digest.
-             * Without that existing artifact, there is nothing safe to
-             * hand over to the central UAT Release Pipeline.
-             */
-            if (previousCommit &&
-                previousImageTag &&
-                previousImageDigest) {
-
-                status =
-                    'NO_RELEASE_BRANCH_REUSE_PREVIOUS'
-
-                action =
-                    'SKIP'
-
+            // No branch means this application was not included in this release.
+            // Reuse its currently deployed UAT image without comparing commits.
+            if (previousCommit && previousImageTag && previousImageDigest) {
+                status = 'NO_RELEASE_BRANCH_REUSE_PREVIOUS'
+                action = 'SKIP'
+                currentCommit = previousCommit
             } else {
-
                 error(
                     "Release branch '${releaseBranch}' is not present for ${appName}, " +
                     "and no complete currently deployed UAT artifact (Git commit, image tag, " +
-                    "and image digest) is available to reuse. Create a release branch for " +
-                    "this application only if it has changed, or establish a valid UAT " +
-                    "baseline before releasing."
+                    "and image digest) is available to reuse."
                 )
             }
 
-        } else if (!previousCommit) {
-
-            /*
-             * First UAT release.
-             * If the application has the release branch,
-             * it must be built.
-             */
-
-            status =
-                'FIRST_UAT_RELEASE'
-
-            action =
-                'BUILD'
-
-        } else if (previousCommit != currentCommit) {
-
-            status =
-                'CODE_CHANGED'
-
-            action =
-                'BUILD'
-
         } else {
-
-            status =
-                'NO_CODE_CHANGE'
-
-            action =
-                'SKIP'
+            // Branch existence alone determines whether this application builds.
+            // Do not compare Git commits to decide BUILD versus SKIP.
+            status = 'RELEASE_BRANCH_FOUND'
+            action = 'BUILD'
         }
-
-        /*
-         * An unchanged application is not missing its Git commit.
-         * It continues to use the exact artifact already deployed in UAT,
-         * so its current UAT commit must remain the previous UAT commit.
-         * This is also required for the UAT handoff summary and environment
-         * manifest to retain complete Git traceability for SKIP applications.
-         */
-        if (action == 'SKIP' && previousCommit) {
-            currentCommit = previousCommit
-        }
-
 
         comparison << [
 
@@ -683,170 +656,17 @@ def call(Map config = [:]) {
 
     /*
      * ---------------------------------------------------------
-     * Same-release rebuild protection
+     * Same-release protection
      * ---------------------------------------------------------
-     *
-     * A release branch is considered frozen for a release version.
-     *
-     * If the same release was already built successfully:
-     *
-     *   - same release branch
-     *   - same commit for every application
-     *
-     * then do NOT rebuild any application.
-     *
-     * If the same release version has moved to a different
-     * commit, fail the pipeline and require a new release version.
+     * The current UAT environment manifest check above rejects any
+     * release version that has already been deployed. The previous
+     * Jenkins build summary is not used to determine release eligibility,
+     * because a build summary can exist for a release that was never
+     * deployed (including an older false-success run).
      * ---------------------------------------------------------
      */
 
     def sameReleaseAlreadyBuilt = false
-
-    if (previousBuildSummary &&
-        previousBuildSummary.release == releaseVersion &&
-        previousBuildSummary.release_branch == releaseBranch &&
-        previousBuildSummary.applications) {
-
-        def previousApplications =
-            previousBuildSummary.applications
-
-        def allApplicationsMatch =
-            comparison.every { app ->
-
-                def previousApp =
-                    previousApplications.find {
-                        it.name == app.name
-                    }
-
-                if (!previousApp) {
-                    return false
-                }
-
-                def previousSummaryCommit =
-                    previousApp.git_commit ?:
-                    previousApp.current_commit ?:
-                    ''
-
-                /*
-                 * For applications whose release branch still exists,
-                 * compare the actual release branch commit.
-                 *
-                 * For applications whose release branch does not exist,
-                 * reuse the existing UAT artifact when the orchestrator
-                 * recovered the previous UAT commit and image details.
-                 */
-                if (app.branchExists) {
-
-                    return app.currentCommit &&
-                        previousSummaryCommit == app.currentCommit
-
-                }
-
-                return app.action == 'SKIP' &&
-                    app.currentCommit &&
-                    app.currentCommit == app.previousCommit &&
-                    app.previousImageTag &&
-                    app.previousImageDigest
-            }
-
-        if (allApplicationsMatch) {
-
-            sameReleaseAlreadyBuilt = true
-
-            echo ""
-            echo "=============================================================="
-            echo "SAME RELEASE ALREADY BUILT"
-            echo "=============================================================="
-            echo "Release Version : ${releaseVersion}"
-            echo "Release Branch  : ${releaseBranch}"
-            echo "Action          : REUSE EXISTING BUILD"
-            echo "No application will be rebuilt."
-            echo "=============================================================="
-
-            comparison.each { app ->
-
-                def previousApp =
-                    previousApplications.find {
-                        it.name == app.name
-                    }
-
-                app.action =
-                    'SKIP'
-
-                app.status =
-                    'SAME_RELEASE_ALREADY_BUILT'
-
-                app.jenkinsJob =
-                    previousApp.jenkins?.job ?:
-                    previousApp.build_job ?:
-                    app.buildJob
-
-                app.jenkinsBuild =
-                    previousApp.jenkins?.build_number ?:
-                    previousApp.build_number ?:
-                    ''
-
-                app.imageTag =
-                    previousApp.image_tag ?:
-                    ''
-
-                app.imageDigest =
-                    previousApp.image_digest ?:
-                    ''
-
-                app.buildResult =
-                    'REUSED'
-
-                echo ""
-                echo "Application    : ${app.name}"
-                echo "Git Commit     : ${app.currentCommit}"
-                echo "Existing Job   : ${app.jenkinsJob}"
-                echo "Existing Build : ${app.jenkinsBuild}"
-                echo "Image Tag      : ${app.imageTag}"
-                echo "Image Digest   : ${app.imageDigest}"
-                echo "Action         : REUSE"
-            }
-
-        } else {
-
-            def changedApplications =
-                comparison.findAll { app ->
-
-                    def previousApp =
-                        previousApplications.find {
-                            it.name == app.name
-                        }
-
-                    !previousApp ||
-                    (
-                        app.branchExists &&
-                        (
-                            !app.currentCommit ||
-                            (
-                                (previousApp.git_commit ?:
-                                 previousApp.current_commit ?:
-                                 '') != app.currentCommit
-                            )
-                        )
-                    ) ||
-                    (
-                        !app.branchExists &&
-                        !app.previousCommit
-                    )
-                }
-
-            if (!changedApplications.isEmpty()) {
-
-                error(
-                    "Release ${releaseVersion} was already built successfully, " +
-                    "but the release branch now has different application commits: " +
-                    changedApplications.collect { it.name }.join(', ') +
-                    ". Create a new release version instead of rebuilding the same release."
-                )
-            }
-        }
-    }
-
 
     /*
      * ---------------------------------------------------------
@@ -910,6 +730,14 @@ def call(Map config = [:]) {
         comparison.findAll {
             !it.branchExists
         }
+
+    if (buildApps.isEmpty()) {
+        error(
+            "No application repository contains release branch '${releaseBranch}'. " +
+            "No UAT build summary will be published. Create the release branch in at least " +
+            "one changed application repository and rerun with a new release version if needed."
+        )
+    }
 
     def approvalMessage =
         new StringBuilder()
@@ -1050,7 +878,7 @@ def call(Map config = [:]) {
 
     if (!buildApps.isEmpty()) {
 
-        stage('Build Changed Applications') {
+        stage('Build Applications with Release Branch') {
 
             def parallelBuilds = [:]
 
@@ -1279,7 +1107,7 @@ def call(Map config = [:]) {
 
                 echo ""
                 echo "=============================================="
-                echo "UNCHANGED APPLICATION"
+                echo "APPLICATION SKIPPED - NO RELEASE BRANCH"
                 echo "=============================================="
                 echo "Application   : ${app.name}"
                 echo "Action        : SKIP"
