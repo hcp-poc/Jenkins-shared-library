@@ -274,7 +274,10 @@ def call(Map config = [:]) {
 
     /*
      * ---------------------------------------------------------
-     * 5. Compare release branch against current UAT
+     * 5. Compare optional per-application release branches against current UAT
+     *    - Branch exists and commit changed: BUILD
+     *    - Branch exists and commit is unchanged: SKIP
+     *    - Branch absent and current UAT artifact is reusable: SKIP/reuse
      * ---------------------------------------------------------
      */
 
@@ -541,10 +544,16 @@ def call(Map config = [:]) {
         if (!branchExists) {
 
             /*
-             * A missing release branch for an application that already
-             * has a UAT artifact means there is no new application build
-             * to perform. Reuse the existing UAT artifact and preserve
-             * its Git commit.
+             * Release branches are required only for applications that
+             * have code changes in this release. If the branch is absent,
+             * reuse the exact image currently deployed in UAT and skip
+             * building this application.
+             *
+             * A missing branch is safe to skip only when the current UAT
+             * manifest (or its recovered release snapshot) provides the
+             * previous commit, image tag, and immutable image digest.
+             * Without that existing artifact, there is nothing safe to
+             * hand over to the central UAT Release Pipeline.
              */
             if (previousCommit &&
                 previousImageTag &&
@@ -558,8 +567,13 @@ def call(Map config = [:]) {
 
             } else {
 
-                status =
-                    'RELEASE_BRANCH_NOT_FOUND'
+                error(
+                    "Release branch '${releaseBranch}' is not present for ${appName}, " +
+                    "and no complete currently deployed UAT artifact (Git commit, image tag, " +
+                    "and image digest) is available to reuse. Create a release branch for " +
+                    "this application only if it has changed, or establish a valid UAT " +
+                    "baseline before releasing."
+                )
             }
 
         } else if (!previousCommit) {
